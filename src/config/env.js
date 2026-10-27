@@ -25,8 +25,30 @@ export const env = {
     database: required('PGDATABASE', 'logsentinel'),
     ssl: parseBoolean(process.env.PGSSL) ? { rejectUnauthorized: false } : false,
   },
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY ?? '',
+    model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+    embeddingModel: process.env.GEMINI_EMBEDDING_MODEL ?? 'gemini-embedding-001',
+    baseUrl: (process.env.GEMINI_API_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(
+      /\/+$/,
+      '',
+    ),
+    timeoutMs: Number.parseInt(process.env.GEMINI_TIMEOUT_MS ?? '30000', 10),
+    embeddingTimeoutMs: Number.parseInt(
+      process.env.GEMINI_EMBEDDING_TIMEOUT_MS ?? '10000',
+      10,
+    ),
+  },
 };
 
 if (Number.isNaN(env.port)) {
   throw new Error('Invalid PORT value: must be a number');
+}
+
+if (Number.isNaN(env.gemini.timeoutMs) || env.gemini.timeoutMs < 1000) {
+  throw new Error('Invalid GEMINI_TIMEOUT_MS value: must be at least 1000');
+}
+
+if (Number.isNaN(env.gemini.embeddingTimeoutMs) || env.gemini.embeddingTimeoutMs < 1000) {
+  throw new Error('Invalid GEMINI_EMBEDDING_TIMEOUT_MS value: must be at least 1000');
 }

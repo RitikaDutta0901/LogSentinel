@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { checkDatabaseConnection, closePool } from './config/db.js';
+import { startLogFlusher, stopLogFlusher } from './services/ingestion.service.js';
 
 const app = createApp();
 let server;
@@ -13,6 +14,8 @@ const start = async () => {
     console.error('[db] Failed to connect to PostgreSQL:', error.message);
     process.exit(1);
   }
+
+  startLogFlusher();
 
   server = app.listen(env.port, () => {
     console.log(`[server] LogSentinel API listening on http://localhost:${env.port} (${env.nodeEnv})`);
@@ -32,6 +35,7 @@ const shutdown = async (signal) => {
   }
 
   try {
+    await stopLogFlusher();
     await closePool();
     console.log('[db] connection pool closed');
   } catch (error) {
