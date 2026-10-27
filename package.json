@@ -1,0 +1,27 @@
+{
+  "name": "logsentinel",
+  "version": "1.0.0",
+  "description": "Centralized log aggregation and observability system",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "keywords": [
+    "logs",
+    "observability",
+    "express",
+    "postgresql"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
+  }
+}
