@@ -629,7 +629,7 @@ Add your key to `.env` and restart the backend:
 
 ```bash
 GEMINI_API_KEY=your_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.6-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 ```
 
@@ -659,7 +659,7 @@ npm run preview
 | `PGDATABASE` | Yes* | `logsentinel` | PostgreSQL database name |
 | `PGSSL` | No | `false` | Set to `true` for managed PostgreSQL with SSL |
 | `GEMINI_API_KEY` | For AI | empty | Server-side Gemini API key for analysis and embeddings |
-| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini text model identifier |
+| `GEMINI_MODEL` | No | `gemini-3.6-flash` | Gemini text model identifier |
 | `GEMINI_EMBEDDING_MODEL` | No | `gemini-embedding-001` | Gemini embedding model identifier |
 | `GEMINI_API_BASE_URL` | No | Google API URL | Override for enterprise gateways or test mocks |
 | `GEMINI_TIMEOUT_MS` | No | `30000` | Gemini analysis request timeout in milliseconds |
@@ -714,7 +714,7 @@ LogSentinel/
 - **Failure recovery:** A failed flush requeues the batch and retries on the next cycle; the oldest logs are dropped only if the buffer is saturated.
 - **Graceful shutdown:** `SIGINT` and `SIGTERM` stop new requests, flush pending logs, then close the PostgreSQL pool.
 - **Prompt-injection defense:** The AI system instruction explicitly treats log messages and metadata as untrusted data, not instructions.
-- **AI resilience:** API key validation, provider timeouts, rate-limit handling, safe error messages, and structured response parsing prevent malformed model output from breaking the dashboard. Embedding requests use the same retry, timeout, and rate-limit handling.
+- **AI resilience:** API key validation, provider timeouts, automatic retries for transient rate-limit and 5xx responses, safe error messages, and structured response parsing prevent malformed model output from breaking the dashboard. Both analysis and embedding requests use retries, timeouts, and rate-limit handling.
 - **Safe embedding backfill:** Only `ERROR` logs with `embedding IS NULL` are selected, updates are parameterized, and the script stops cleanly on provider failures. Re-running it never re-embeds completed rows.
 - **Semantic search grounding:** Retrieved logs are treated as untrusted context, limited to the five nearest neighbors, and truncated before being placed in the prompt. The model is instructed to report insufficient evidence instead of inventing incidents.
 - **Graceful embedding degradation:** If embeddings are unavailable, ERROR logs are still stored and the application keeps working; only semantic search for those rows is affected.

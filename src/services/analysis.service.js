@@ -7,6 +7,10 @@ const MAX_MESSAGE_CHARS = 2000;
 const MAX_METADATA_CHARS = 1000;
 const MAX_EVIDENCE_ITEMS = 6;
 const MAX_RECOMMENDATION_ITEMS = 5;
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 750;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ANALYSIS_SCHEMA = {
   type: 'OBJECT',
@@ -125,70 +129,96 @@ export const requestStructuredAnalysis = async ({
   systemInstruction = SYSTEM_INSTRUCTION,
   temperature = 0.2,
 }) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), env.gemini.timeoutMs);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), env.gemini.timeoutMs);
 
-  try {
-    const response = await fetch(
-      `${env.gemini.baseUrl}/v1beta/models/${encodeURIComponent(env.gemini.model)}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': env.gemini.apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemInstruction }],
+    try {
+      const response = await fetch(
+        `${env.gemini.baseUrl}/v1beta/models/${encodeURIComponent(env.gemini.model)}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': env.gemini.apiKey,
           },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: prompt }],
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
             },
-          ],
-          generationConfig: {
-            temperature,
-            maxOutputTokens: 4096,
-            responseMimeType: 'application/json',
-            responseSchema: ANALYSIS_SCHEMA,
-          },
-        }),
-        signal: controller.signal,
-      },
-    );
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      console.error(
-        `[ai] Gemini request failed with status ${response.status}: ${truncate(errorBody, 500)}`,
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              temperature,
+              maxOutputTokens: 4096,
+              responseMimeType: 'application/json',
+              responseSchema: ANALYSIS_SCHEMA,
+            },
+          }),
+          signal: controller.signal,
+        },
       );
 
-      if (response.status === 429) {
-        throw new HttpError(429, 'AI provider rate limit reached, try again shortly');
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        const retryable = response.status === 429 || response.status >= 500;
+
+        console.error(
+          `[ai] Gemini request failed with status ${response.status} (attempt ${attempt}/${MAX_ATTEMPTS}): ${truncate(errorBody, 500)}`,
+        );
+
+        if (retryable && attempt < MAX_ATTEMPTS) {
+          await delay(RETRY_BASE_DELAY_MS * attempt);
+          continue;
+        }
+
+        if (response.status === 429) {
+          throw new HttpError(429, 'AI provider rate limit reached, try again shortly');
+        }
+
+        throw new HttpError(502, 'AI provider request failed');
       }
 
-      throw new HttpError(502, 'AI provider request failed');
+      const payload = await response.json().catch(() => null);
+      if (!payload) {
+        throw new HttpError(502, 'AI provider returned an unreadable response');
+      }
+
+      return parseAnalysis(payload);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+
+      if (error.name === 'AbortError') {
+        if (attempt < MAX_ATTEMPTS) {
+          console.error(`[ai] Gemini request timed out (attempt ${attempt}/${MAX_ATTEMPTS})`);
+          await delay(RETRY_BASE_DELAY_MS * attempt);
+          continue;
+        }
+
+        throw new HttpError(504, 'AI analysis timed out, try again');
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        console.error(
+          `[ai] Gemini request error (attempt ${attempt}/${MAX_ATTEMPTS}):`,
+          error.message,
+        );
+        await delay(RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+
+      console.error('[ai] Gemini request error:', error.message);
+      throw new HttpError(502, 'Unable to reach the AI provider');
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const payload = await response.json().catch(() => null);
-    if (!payload) {
-      throw new HttpError(502, 'AI provider returned an unreadable response');
-    }
-
-    return parseAnalysis(payload);
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-
-    if (error.name === 'AbortError') {
-      throw new HttpError(504, 'AI analysis timed out, try again');
-    }
-
-    console.error('[ai] Gemini request error:', error.message);
-    throw new HttpError(502, 'Unable to reach the AI provider');
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw new HttpError(502, 'AI provider request failed');
 };
 
 const runAnalysis = async () => {

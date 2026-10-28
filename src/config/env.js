@@ -27,7 +27,7 @@ export const env = {
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY ?? '',
-    model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+    model: process.env.GEMINI_MODEL ?? 'gemini-3.6-flash',
     embeddingModel: process.env.GEMINI_EMBEDDING_MODEL ?? 'gemini-embedding-001',
     baseUrl: (process.env.GEMINI_API_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(
       /\/+$/,
