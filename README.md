@@ -548,6 +548,14 @@ npm run db:migrate
 
 This creates the `logs` table, the migration tracking table, the GIN/B-Tree indexes, and the pgvector `embedding` column with its HNSW index. Migration `003` runs `CREATE EXTENSION IF NOT EXISTS vector;`, so the database role must be allowed to create extensions. The runner is idempotent and skips migrations already applied.
 
+Verify the setup with:
+
+```bash
+npm run db:check
+```
+
+Expected output includes the pgvector version, `logs.embedding type: vector(768)`, the `idx_logs_embedding_hnsw` index, and current log counts.
+
 ### 6. Backfill Embeddings for Existing ERROR Logs (Optional)
 
 If the database already contains `ERROR` logs from before embeddings were enabled, generate their vectors once:
@@ -673,6 +681,7 @@ LogSentinel/
 │   ├── db/
 │   │   ├── migrations/       # Schema, index, and pgvector migrations
 │   │   ├── backfillEmbeddings.js  # Embed ERROR logs stored before RAG
+│   │   ├── check.js          # Verify pgvector, column, and HNSW index
 │   │   └── migrate.js        # Idempotent migration runner
 │   ├── errors/               # Shared HTTP and validation errors
 │   ├── middleware/           # 404 and centralized error handling
