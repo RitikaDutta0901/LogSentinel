@@ -5,6 +5,7 @@ import { StatCards } from './components/StatCards.jsx';
 import { ErrorChart } from './components/ErrorChart.jsx';
 import { LogStream } from './components/LogStream.jsx';
 import { AnalysisModal } from './components/AnalysisModal.jsx';
+import { SemanticSearchModal } from './components/SemanticSearchModal.jsx';
 import { DEFAULT_FILTERS, TIME_RANGES } from './constants.js';
 import { useDebouncedValue } from './hooks/useDebouncedValue.js';
 import { useDashboardData } from './hooks/useDashboardData.js';
@@ -18,6 +19,7 @@ export default function App() {
   const [live, setLive] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [semanticOpen, setSemanticOpen] = useState(false);
 
   const debouncedSearch = useDebouncedValue(searchInput, 350);
 
@@ -72,6 +74,7 @@ export default function App() {
   };
 
   const closeAnalysis = useCallback(() => setAnalysisOpen(false), []);
+  const closeSemanticSearch = useCallback(() => setSemanticOpen(false), []);
 
   const windowLabel =
     TIME_RANGES.find((range) => range.value === filters.timeRange)?.label ?? 'Custom range';
@@ -102,6 +105,7 @@ export default function App() {
             onRefresh={refresh}
             refreshing={refreshing}
             lastUpdated={lastUpdated}
+            onOpenSemanticSearch={() => setSemanticOpen(true)}
           />
 
           <StatCards
@@ -144,6 +148,7 @@ export default function App() {
       </main>
 
       <AnalysisModal open={analysisOpen} onClose={closeAnalysis} />
+      <SemanticSearchModal open={semanticOpen} onClose={closeSemanticSearch} />
     </div>
   );
 }

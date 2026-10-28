@@ -1,4 +1,4 @@
-import { MenuIcon, RefreshIcon } from './icons.jsx';
+import { MenuIcon, RefreshIcon, SparklesIcon } from './icons.jsx';
 import { formatClock } from '../utils/format.js';
 
 export const Header = ({
@@ -8,6 +8,7 @@ export const Header = ({
   onRefresh,
   refreshing,
   lastUpdated,
+  onOpenSemanticSearch,
 }) => (
   <header className="mb-6 flex flex-col gap-4 border-b border-slate-800/80 pb-6 sm:flex-row sm:items-center sm:justify-between">
     <div className="flex items-start gap-3">
@@ -53,6 +54,16 @@ export const Header = ({
           />
         </span>
         {live ? 'Live' : 'Paused'}
+      </button>
+      <button
+        type="button"
+        onClick={onOpenSemanticSearch}
+        title="Semantic search"
+        aria-label="Open semantic search"
+        className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-gradient-to-r from-violet-500/15 to-sky-500/15 px-3 py-2 text-xs font-medium text-violet-200 transition hover:from-violet-500/25 hover:to-sky-500/25"
+      >
+        <SparklesIcon className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">Semantic search</span>
       </button>
       <button
         type="button"
