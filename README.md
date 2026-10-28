@@ -2,7 +2,7 @@
 
 **A high-throughput log aggregation and observability platform — a Mini-Splunk for centralized application logs.**
 
-LogSentinel ingests high-volume application logs, buffers and batches writes into PostgreSQL, exposes indexed search and aggregation APIs, and renders a real-time React dashboard. It also uses Google Gemini to analyze recent error bursts and return a structured root-cause analysis with supporting evidence and remediation steps.
+LogSentinel ingests high-volume application logs, buffers and batches writes into PostgreSQL, exposes indexed search and aggregation APIs, and renders a real-time React dashboard. It also uses Google Gemini to analyze recent error bursts and return a structured root-cause analysis with supporting evidence and remediation steps. ERROR logs are embedded with Gemini and stored in pgvector, enabling natural-language semantic search that grounds each answer in the most similar historical incidents.
 
 ---
 
@@ -28,6 +28,8 @@ LogSentinel ingests high-volume application logs, buffers and batches writes int
 - **Backpressure and recovery:** Bounded 10,000-log buffer, failed-flush requeue, and graceful shutdown that drains pending logs before closing the connection pool.
 - **Strict validation:** Validates service names, log levels, timestamps, messages, metadata shape, and payload size before accepting data.
 - **Advanced search:** Filters by time range, level, and service; supports PostgreSQL full-text search over log messages with pagination and indexed query paths.
+- **Semantic search (RAG):** Embeds `ERROR` messages at ingestion, stores 768-dimension vectors in pgvector with an HNSW cosine index, retrieves the five nearest historical errors for a natural-language query, and asks Gemini for a grounded root-cause analysis.
+- **Embedding backfill:** A re-runnable `npm run db:backfill-embeddings` script embeds ERROR logs that were stored before embeddings were enabled.
 - **Indexed query paths:** GIN indexes for JSONB metadata and full-text search, plus B-Tree indexes for timestamp, level, and service access patterns.
 - **Real-time dashboard:** React dashboard with debounced search, faceted filters, live polling, expandable metadata, pagination, and an Errors-vs-Time bar chart.
 - **AI-driven anomaly detection:** Sends the latest 20 `ERROR` logs to Gemini and returns a structured suggested root cause, confidence level, evidence, and recommended actions.
@@ -41,8 +43,8 @@ LogSentinel ingests high-volume application logs, buffers and batches writes int
 | --- | --- |
 | Frontend | React 19, Vite 8, Tailwind CSS 4, Recharts 3 |
 | Backend | Node.js 20+, Express 5, ES Modules |
-| Database | PostgreSQL 16, `pg` connection pool, raw SQL migrations |
-| AI / LLM | Google Gemini API (structured JSON output) |
+| Database | PostgreSQL 16, `pg` connection pool, raw SQL migrations, pgvector (HNSW) |
+| AI / LLM | Google Gemini API (structured JSON output and 768-dimension embeddings) |
 | Tooling | npm, dotenv, Vite proxy, Git |
 | Architecture | REST API, in-process batching buffer, repository/service/controller layering |
 
@@ -117,6 +119,14 @@ The primary data path is:
 4. Gemini is called with a structured JSON response schema.
 5. The dashboard displays the root cause, confidence, evidence, and recommendations in a modal.
 
+### Semantic Search (RAG) Flow
+
+1. During ingestion, each `ERROR` message is embedded with Gemini and stored in the `embedding` column. `INFO` and `WARN` logs are not embedded.
+2. The user opens **Semantic search** and asks a question such as "Why did checkout payments fail?".
+3. `POST /api/analyze-rag` embeds the query, then retrieves the top five `ERROR` logs by cosine similarity using the HNSW index.
+4. Gemini receives the query and the retrieved logs and returns a structured root-cause analysis grounded in that evidence.
+5. The dashboard displays the analysis alongside each retrieved log and its similarity score.
+
 ---
 
 ## Database Schema and Indexing
@@ -131,15 +141,19 @@ The primary data path is:
 | `log_level` | `VARCHAR(10)` | Not null, `CHECK` in `INFO`, `WARN`, `ERROR` | Severity classification |
 | `message` | `TEXT` | Not null | Human-readable log message |
 | `metadata` | `JSONB` | Not null, default `{}` | Dynamic structured fields such as request IDs, regions, and latency |
+| `embedding` | `vector(768)` | Nullable | Gemini embedding of `ERROR` messages for semantic search |
 
 ```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   service_name TEXT NOT NULL,
   log_level VARCHAR(10) NOT NULL CHECK (log_level IN ('INFO', 'WARN', 'ERROR')),
   message TEXT NOT NULL,
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  embedding vector(768)
 );
 ```
 
@@ -165,6 +179,11 @@ CREATE INDEX idx_logs_service_timestamp_btree
 -- Full-text search over log messages
 CREATE INDEX idx_logs_message_fts
   ON logs USING GIN (to_tsvector('english', message));
+
+-- Approximate nearest-neighbor search over ERROR log embeddings
+CREATE INDEX idx_logs_embedding_hnsw
+  ON logs USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
 ```
 
 **Why GIN for JSONB:** `metadata` is schemaless, so a B-Tree cannot efficiently answer containment queries such as `metadata @> '{"region":"us-east-1"}'`. A GIN inverted index indexes JSONB keys and values and avoids sequential scans as metadata grows.
@@ -172,6 +191,8 @@ CREATE INDEX idx_logs_message_fts
 **Why GIN for full-text search:** The expression index on `to_tsvector('english', message)` allows `@@ plainto_tsquery(...)` queries to use an index instead of scanning every message with `LIKE '%term%'`.
 
 **Why B-Tree for timestamp and level:** B-Tree indexes support equality, range predicates, and ordered scans. `(timestamp DESC)` accelerates time-range filtering and the default newest-first pagination. The composite `(log_level, timestamp DESC)` and `(service_name, timestamp DESC)` indexes serve the most common dashboard filters while preserving timestamp ordering.
+
+**Why HNSW for embeddings:** Semantic search ranks logs by cosine distance (`embedding <=> query_vector`). HNSW is an approximate nearest-neighbor index that keeps similarity search fast as the table grows, instead of comparing the query against every embedded row. Only `ERROR` logs receive embeddings; `INFO` and `WARN` rows keep `embedding = NULL`. Migration `003_add_log_embeddings.sql` requires the pgvector extension to be installed on the PostgreSQL server.
 
 Indexes are applied through versioned migrations:
 
@@ -193,6 +214,7 @@ Base URL: `http://localhost:4000`
 | `GET` | `/api/logs/services` | List distinct service names |
 | `GET` | `/api/logs/stats` | Error counts bucketed over time |
 | `POST` | `/api/analyze` | Analyze the latest 20 `ERROR` logs with Gemini |
+| `POST` | `/api/analyze-rag` | Answer a natural-language query using similar `ERROR` logs (RAG) |
 
 ### `POST /api/ingest`
 
@@ -396,6 +418,59 @@ curl -X POST http://localhost:4000/api/analyze
 
 Other failure modes: `502` when the AI provider fails or is unreachable, `504` on timeout, and `429` when the provider rate limit is reached.
 
+### `POST /api/analyze-rag`
+
+Answers a natural-language question using retrieval-augmented generation. The query is embedded, the five most similar `ERROR` logs are retrieved by cosine similarity, and Gemini produces a structured analysis grounded in those logs.
+
+**Request**
+
+```bash
+curl -X POST http://localhost:4000/api/analyze-rag \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Why did checkout payments fail?"}'
+```
+
+The `query` field is required, must be non-empty, and is limited to 1,000 characters.
+
+**Response — `200 OK`**
+
+```json
+{
+  "success": true,
+  "analyzedAt": "2026-10-27T10:26:00.000Z",
+  "query": "Why did checkout payments fail?",
+  "contextCount": 5,
+  "retrievedLogs": [
+    {
+      "id": "0e61250c-34e0-4116-a96d-62a73d524173",
+      "timestamp": "2026-10-27T10:14:30.917Z",
+      "service": "checkout",
+      "message": "Payment authorization failed: connection pool timeout",
+      "metadata": {
+        "orderId": "ORD-1042",
+        "region": "us-east-1"
+      },
+      "similarity": 0.87
+    }
+  ],
+  "analysis": {
+    "suggestedRootCause": "PostgreSQL connection pool exhaustion caused checkout payment authorization timeouts.",
+    "summary": "Retrieved errors cluster around pool acquisition failures during a checkout retry burst.",
+    "confidence": "high",
+    "evidence": [
+      "The most similar log reports a connection pool timeout in checkout.",
+      "Related errors share the same order and region metadata."
+    ],
+    "recommendations": [
+      "Add PgBouncer or increase the PostgreSQL pool size.",
+      "Add exponential backoff and jitter to checkout retries."
+    ]
+  }
+}
+```
+
+If no embedded `ERROR` logs exist, `contextCount` is `0` and the analysis explicitly reports insufficient evidence. Failures use the same status codes as `/api/analyze`: `400` for an invalid query, `503` when `GEMINI_API_KEY` is missing, `502` for provider failures, `504` on timeout, and `429` for provider rate limits.
+
 ### `GET /health`
 
 ```json
@@ -421,7 +496,8 @@ Returns `503` with `"status": "degraded"` if PostgreSQL is unreachable.
 - Node.js 20.19+ or 22.12+ (required by Vite 8)
 - npm 10 or newer
 - PostgreSQL 14 or newer, running locally or reachable over the network
-- A Google Gemini API key for AI analysis (optional for non-AI features)
+- The [pgvector](https://github.com/pgvector/pgvector) extension available for your PostgreSQL version (required for semantic search)
+- A Google Gemini API key for AI analysis and embeddings (required for semantic search, optional for non-AI features)
 
 ### 1. Clone the Repository
 
@@ -454,17 +530,35 @@ CREATE DATABASE logsentinel;
 cp .env.example .env
 ```
 
-Edit `.env` with your PostgreSQL credentials. Either use `DATABASE_URL` or the individual `PG*` variables.
+Edit `.env` with your PostgreSQL credentials. Either use `DATABASE_URL` or the individual `PG*` variables. Set `GEMINI_API_KEY` too if you want AI analysis and semantic search.
 
-### 5. Run Database Migrations
+### 5. Install pgvector and Run Migrations
+
+Install pgvector for your PostgreSQL version. On Debian or Ubuntu, the package is usually named after the server version:
+
+```bash
+sudo apt install postgresql-16-pgvector
+```
+
+On macOS with Homebrew, `brew install pgvector` works for a locally built PostgreSQL. Managed providers usually have an extension allowlist; enable `vector` there. Then run:
 
 ```bash
 npm run db:migrate
 ```
 
-This creates the `logs` table, the migration tracking table, and all GIN/B-Tree indexes. The runner is idempotent and skips migrations already applied.
+This creates the `logs` table, the migration tracking table, the GIN/B-Tree indexes, and the pgvector `embedding` column with its HNSW index. Migration `003` runs `CREATE EXTENSION IF NOT EXISTS vector;`, so the database role must be allowed to create extensions. The runner is idempotent and skips migrations already applied.
 
-### 6. Start the Backend
+### 6. Backfill Embeddings for Existing ERROR Logs (Optional)
+
+If the database already contains `ERROR` logs from before embeddings were enabled, generate their vectors once:
+
+```bash
+npm run db:backfill-embeddings
+```
+
+The script requires `GEMINI_API_KEY`, processes logs whose `embedding` is `NULL` in batches of 50, and is safe to re-run. New `ERROR` logs are embedded automatically during ingestion, so this step is only needed for pre-existing data.
+
+### 7. Start the Backend
 
 ```bash
 npm run dev
@@ -482,7 +576,7 @@ The API listens on `http://localhost:4000` by default. Verify it:
 curl http://localhost:4000/health
 ```
 
-### 7. Install and Start the Frontend
+### 8. Install and Start the Frontend
 
 Open a second terminal:
 
@@ -494,7 +588,7 @@ npm run dev
 
 Open `http://localhost:5173`. Vite proxies `/api` requests to the backend at `http://localhost:4000`.
 
-### 8. Seed Sample Logs
+### 9. Seed Sample Logs
 
 ```bash
 curl -X POST http://localhost:4000/api/ingest \
@@ -521,18 +615,19 @@ curl -X POST http://localhost:4000/api/ingest \
 
 Logs appear in the dashboard within approximately 5 seconds after the buffer flush.
 
-### 9. Enable AI Analysis
+### 10. Enable AI Analysis and Semantic Search
 
 Add your key to `.env` and restart the backend:
 
 ```bash
 GEMINI_API_KEY=your_api_key_here
 GEMINI_MODEL=gemini-2.5-flash
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 ```
 
-Then click **Analyze with AI** in the dashboard. The modal displays the suggested root cause, confidence, evidence, and recommended actions.
+Restart the backend after changing `.env`. Then click **Analyze with AI** to analyze the latest errors, or **Semantic search** to ask a natural-language question. The semantic search modal shows the grounded analysis along with the retrieved logs and their similarity scores. If you enabled embeddings after logs were already stored, run `npm run db:backfill-embeddings` once.
 
-### 10. Build the Frontend for Production
+### 11. Build the Frontend for Production
 
 ```bash
 cd client
@@ -555,10 +650,12 @@ npm run preview
 | `PGPASSWORD` | No | empty | PostgreSQL password |
 | `PGDATABASE` | Yes* | `logsentinel` | PostgreSQL database name |
 | `PGSSL` | No | `false` | Set to `true` for managed PostgreSQL with SSL |
-| `GEMINI_API_KEY` | For AI | empty | Server-side Gemini API key |
-| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model identifier |
+| `GEMINI_API_KEY` | For AI | empty | Server-side Gemini API key for analysis and embeddings |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini text model identifier |
+| `GEMINI_EMBEDDING_MODEL` | No | `gemini-embedding-001` | Gemini embedding model identifier |
 | `GEMINI_API_BASE_URL` | No | Google API URL | Override for enterprise gateways or test mocks |
-| `GEMINI_TIMEOUT_MS` | No | `30000` | Gemini request timeout in milliseconds |
+| `GEMINI_TIMEOUT_MS` | No | `30000` | Gemini analysis request timeout in milliseconds |
+| `GEMINI_EMBEDDING_TIMEOUT_MS` | No | `10000` | Gemini embedding request timeout in milliseconds |
 
 \* Required when `DATABASE_URL` is not set.
 
@@ -574,20 +671,21 @@ LogSentinel/
 │   ├── config/               # Environment validation and PostgreSQL pool
 │   ├── controllers/          # HTTP request handlers
 │   ├── db/
-│   │   ├── migrations/       # Schema and index migrations
+│   │   ├── migrations/       # Schema, index, and pgvector migrations
+│   │   ├── backfillEmbeddings.js  # Embed ERROR logs stored before RAG
 │   │   └── migrate.js        # Idempotent migration runner
 │   ├── errors/               # Shared HTTP and validation errors
 │   ├── middleware/           # 404 and centralized error handling
 │   ├── repositories/         # Parameterized SQL queries
 │   ├── routes/               # Express route definitions
-│   ├── services/             # Batching and Gemini analysis services
-│   ├── validators/           # Ingestion and query validation
+│   ├── services/             # Batching, embeddings, RAG, and Gemini analysis
+│   ├── validators/           # Ingestion, query, and RAG validation
 │   ├── app.js                # Express application setup
 │   └── server.js             # Startup, health check, graceful shutdown
 ├── client/
 │   └── src/
 │       ├── api/              # Backend API clients
-│       ├── components/       # Dashboard, chart, log stream, AI modal
+│       ├── components/       # Dashboard, chart, log stream, AI and semantic search modals
 │       ├── hooks/            # Polling and debounce hooks
 │       ├── utils/            # Formatting and chart transforms
 │       ├── App.jsx
@@ -607,7 +705,10 @@ LogSentinel/
 - **Failure recovery:** A failed flush requeues the batch and retries on the next cycle; the oldest logs are dropped only if the buffer is saturated.
 - **Graceful shutdown:** `SIGINT` and `SIGTERM` stop new requests, flush pending logs, then close the PostgreSQL pool.
 - **Prompt-injection defense:** The AI system instruction explicitly treats log messages and metadata as untrusted data, not instructions.
-- **AI resilience:** API key validation, provider timeouts, rate-limit handling, safe error messages, and structured response parsing prevent malformed model output from breaking the dashboard.
+- **AI resilience:** API key validation, provider timeouts, rate-limit handling, safe error messages, and structured response parsing prevent malformed model output from breaking the dashboard. Embedding requests use the same retry, timeout, and rate-limit handling.
+- **Safe embedding backfill:** Only `ERROR` logs with `embedding IS NULL` are selected, updates are parameterized, and the script stops cleanly on provider failures. Re-running it never re-embeds completed rows.
+- **Semantic search grounding:** Retrieved logs are treated as untrusted context, limited to the five nearest neighbors, and truncated before being placed in the prompt. The model is instructed to report insufficient evidence instead of inventing incidents.
+- **Graceful embedding degradation:** If embeddings are unavailable, ERROR logs are still stored and the application keeps working; only semantic search for those rows is affected.
 - **Single-instance buffer trade-off:** The in-process buffer is simple and fast for a single API instance. Horizontal scaling would require a shared queue such as Redis Streams or Kafka and idempotent consumers.
 
 ---

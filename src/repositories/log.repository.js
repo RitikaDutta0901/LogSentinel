@@ -105,6 +105,42 @@ export const findSimilarErrorLogs = async (embedding, limit = 5) => {
   return result.rows;
 };
 
+export const findErrorLogsMissingEmbeddings = async (limit = 50) => {
+  const safeLimit = Math.min(Math.max(limit, 1), 500);
+
+  const result = await query(
+    `SELECT id, message
+     FROM logs
+     WHERE log_level = 'ERROR' AND embedding IS NULL
+     ORDER BY timestamp ASC, id ASC
+     LIMIT $1`,
+    [safeLimit],
+  );
+
+  return result.rows;
+};
+
+export const updateLogEmbeddings = async (items) => {
+  if (!Array.isArray(items) || items.length === 0) return 0;
+
+  const values = [];
+  const placeholders = items.map((item, index) => {
+    const offset = index * 2;
+    values.push(item.id, JSON.stringify(item.embedding));
+    return `($${offset + 1}::uuid, $${offset + 2}::vector)`;
+  });
+
+  await query(
+    `UPDATE logs AS target
+     SET embedding = data.embedding
+     FROM (VALUES ${placeholders.join(', ')}) AS data(id, embedding)
+     WHERE target.id = data.id`,
+    values,
+  );
+
+  return items.length;
+};
+
 export const getRecentErrorLogs = async (limit = 20) => {
   const result = await query(
     `SELECT id, timestamp, service_name, log_level, message, metadata
